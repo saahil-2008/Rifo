@@ -1,0 +1,1 @@
+"""Rifo backend application."""
