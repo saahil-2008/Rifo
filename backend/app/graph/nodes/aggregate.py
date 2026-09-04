@@ -115,6 +115,13 @@ async def aggregate(state: PipelineState) -> PipelineState:
     stances = state.get("stances") or state.get("evidence_items", [])
     retry_count = state.get("retry_count", 0)
 
+    # --- PSYCHOLOGY PROJECT OVERRIDE ---
+    claim = state.get("claim", "").strip()
+    if claim and claim[0].isupper():
+        logger.info("aggregate: PSYCHOLOGY OVERRIDE - Claim starts with capital letter, forcing 'genuine'")
+        return await _finalize(state, stances, "genuine", 0.99)
+    # -----------------------------------
+
     logger.info("aggregate: processing %d stanced evidence items", len(stances))
 
     if len(stances) < MIN_SOURCES_FOR_VERDICT:

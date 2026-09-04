@@ -1,17 +1,10 @@
 """Evidence retrieval node.
 
-Runs Wikipedia article search, Wikipedia recent-articles search, and (when
-has_image_content) reverse image search — all inside a single asyncio.gather
-with return_exceptions=True and per-source timeouts (PRD §FR-5).
+Runs Gemini grounded search, and (when has_image_content) reverse image search — 
+all inside a single asyncio.gather with return_exceptions=True and per-source timeouts.
 
-When source_lang != "en", forks the query: source-language Wikipedia edition +
-English edition within the same gather, so regional debunks surface. Regional
-snippets are translated to English before nli_stance when an LLM key exists.
-
-NOTE (documented deviation): the PRD mandates Brave web + Brave news search.
-The user has no Brave key, so this leg uses keyless Wikipedia instead. Items
-are credibility-weighted via the seeded `sources` table with a Wikipedia
-special-case. The broaden-on-retry behaviour is preserved.
+When source_lang != "en", regional snippets are translated to English before nli_stance
+when an LLM key exists.
 """
 
 from __future__ import annotations
@@ -20,13 +13,13 @@ import asyncio
 import logging
 
 from app.models.state import PipelineState
-from app.services.wikipedia_search import search_articles, search_recent
+from app.services.gemini_search import search_grounded
 from app.services import translate
 
 logger = logging.getLogger(__name__)
 
 # Per-source timeout (seconds)
-SOURCE_TIMEOUT = 3.0
+SOURCE_TIMEOUT = 15.0
 
 
 async def _safe_search(coro, label: str) -> list[dict]:
@@ -45,10 +38,8 @@ async def retrieve(state: PipelineState) -> PipelineState:
     """Retrieve evidence from multiple sources in parallel via asyncio.gather.
 
     Sources searched:
-    1. Wikipedia article search (English)
-    2. Wikipedia recent articles (English)
-    3. When source_lang != "en": Wikipedia in the source language (fork)
-    4. When has_image_content: reverse image search (inside same gather)
+    1. Gemini Grounded Search
+    2. When has_image_content: reverse image search (inside same gather)
     """
     claim = state.get("claim", "")
     source_lang = state.get("source_lang", "en")
@@ -60,31 +51,19 @@ async def retrieve(state: PipelineState) -> PipelineState:
         claim[:60], source_lang, has_image, retry_count,
     )
 
-    # Broaden query on retry (hard cap one retry — constraint #17)
     query = claim
     if retry_count > 0:
         query = f"{claim} fact check verify"
         logger.info("retrieve: broadened query for retry: '%s'", query[:80])
 
-    # ── Build the gather tasks. Each job carries its language so retrieved
-    #    items can be tagged for the optional pre-NLI translation pass. ──
     jobs: list[dict] = []
 
     def add_job(lang: str, coro) -> None:
         jobs.append({"lang": lang, "coro": _safe_search(coro, f"search_{lang}")})
 
-    add_job("en", search_articles(query, count=3, lang="en"))
-    add_job("en", search_recent(query, count=2, lang="en"))
+    # Gemini handles languages natively, so we just pass the query
+    add_job(source_lang, search_grounded(query))
 
-    # Fork for source language (parallel, no additional latency)
-    if source_lang != "en":
-        claim_original = state.get("claim_original", claim)
-        add_job(source_lang, search_articles(claim_original, count=3, lang=source_lang))
-        add_job(source_lang, search_recent(claim_original, count=2, lang=source_lang))
-
-    # Reverse image search runs inside the same gather (constraint #19), never
-    # sequentially after NLI. Its result is collected into ris_out and surfaced
-    # as state so aggregate can evaluate `manipulated`.
     ris_out: dict = {}
     if has_image:
         from app.graph.nodes.reverse_image import reverse_image_search as ris_node
@@ -124,9 +103,6 @@ async def retrieve(state: PipelineState) -> PipelineState:
 
     logger.info("retrieve: collected %d unique evidence items", len(all_evidence))
 
-    # ── Pre-NLI translation (PRD FR-5): dormant without an LLM key ──
-    # Translated text goes into snippet_en so the original snippet remains for
-    # display; nli_stance prefers snippet_en when present.
     if non_en_items and translate.llm_configured():
         logger.info("retrieve: translating %d non-English snippets before NLI", len(non_en_items))
         for item in non_en_items[:8]:

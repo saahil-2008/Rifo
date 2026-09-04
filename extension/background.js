@@ -54,11 +54,9 @@ async function getDeviceId() {
 
 // ── Context menu click handler ────────────────────────────────────────────────
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+async function handleVerifyAction(tab, selectionText, srcUrl, menuItemId) {
   if (!tab?.id) return;
 
-  // Guard: do not attempt injection into chrome:// or webstore pages.
-  // Chrome would throw; we fail quietly.
   const url = tab.url || "";
   if (
     url.startsWith("chrome://") ||
@@ -71,12 +69,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
   const deviceId = await getDeviceId();
 
-  // Tell the content script to show a loading card and anchor to the
-  // current selection / image position.
   try {
     await chrome.tabs.sendMessage(tab.id, {
       type: "start_verify",
-      menuItemId: info.menuItemId,
+      menuItemId: menuItemId,
     });
   } catch (e) {
     console.warn("Rifo: content script not reachable, injecting dynamically...", e);
@@ -87,7 +83,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       });
       await chrome.tabs.sendMessage(tab.id, {
         type: "start_verify",
-        menuItemId: info.menuItemId,
+        menuItemId: menuItemId,
       });
     } catch (err) {
       console.error("Rifo: failed to dynamically inject:", err);
@@ -95,10 +91,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     }
   }
 
-  // Build the request payload based on which menu item was clicked.
   let payload;
-  if (info.menuItemId === "verify-text") {
-    const text = (info.selectionText || "").trim();
+  if (menuItemId === "verify-text") {
+    const text = (selectionText || "").trim();
     if (!text) {
       sendFrame(tab.id, {
         stage: "error",
@@ -108,9 +103,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       return;
     }
     payload = { type: "text", content: text, device_id: deviceId };
-  } else if (info.menuItemId === "verify-image") {
-    const srcUrl = (info.srcUrl || "").trim();
-    if (!srcUrl) {
+  } else if (menuItemId === "verify-image") {
+    const src = (srcUrl || "").trim();
+    if (!src) {
       sendFrame(tab.id, {
         stage: "error",
         code: "upload_failed",
@@ -118,13 +113,33 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       });
       return;
     }
-    payload = { type: "image", image_url: srcUrl, device_id: deviceId };
+    payload = { type: "image", image_url: src, device_id: deviceId };
   } else {
     return;
   }
 
-  // Open WebSocket and stream frames to the tab.
   openVerifyStream(tab.id, payload);
+}
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  handleVerifyAction(tab, info.selectionText, info.srcUrl, info.menuItemId);
+});
+
+chrome.action.onClicked.addListener(async (tab) => {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => window.getSelection().toString()
+    });
+    
+    if (result && result.trim()) {
+      handleVerifyAction(tab, result, null, "verify-text");
+    } else {
+      handleVerifyAction(tab, "", null, "verify-text");
+    }
+  } catch (err) {
+    console.error("Failed to get selection", err);
+  }
 });
 
 // ── WebSocket streaming ───────────────────────────────────────────────────────
