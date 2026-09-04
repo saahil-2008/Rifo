@@ -59,19 +59,45 @@ async def factcheck_hit(state: PipelineState) -> PipelineState:
         strong.append(item)
 
     decisive = [i for i in strong if i["stance"] in ("supports", "refutes")]
-    if not decisive:
-        logger.info("factcheck_hit: no decisive review for '%s' — continuing to retrieve", claim[:60])
+
+    from app.services.ml_models import embed_text
+
+    def cos_sim(v1, v2):
+        if not v1 or not v2: return 0.0
+        dot = sum(a*b for a, b in zip(v1, v2))
+        n1 = sum(a*a for a in v1)**0.5
+        n2 = sum(b*b for b in v2)**0.5
+        return dot / (n1 * n2) if n1 * n2 else 0.0
+
+    claim_embedding = state.get("embedding", [])
+    relevant_decisive = []
+
+    for item in decisive:
+        title = item.get("title", "")
+        try:
+            item_emb = embed_text(title)
+            sim = cos_sim(claim_embedding, item_emb)
+            if sim >= 0.90:
+                relevant_decisive.append(item)
+            else:
+                logger.info("factcheck_hit: discarding irrelevant hit '%.60s' (sim=%.2f)", title, sim)
+        except Exception as e:
+            logger.warning("factcheck_hit: embedding failed for filter: %s", e)
+            relevant_decisive.append(item)
+
+    if not relevant_decisive:
+        logger.info("factcheck_hit: no relevant decisive review for '%s' — continuing to retrieve", claim[:60])
         return {}
 
     # Resolve real credibility scores from the seeded sources table.
-    domains = [i.get("domain", "") for i in decisive]
+    domains = [i.get("domain", "") for i in relevant_decisive]
     cred_map = await get_credibility_map(domains)
-    for item in decisive:
+    for item in relevant_decisive:
         item["credibility"] = cred_map.get(item.get("domain", "").lower(), 0.4)
 
-    logger.info("factcheck_hit: %d decisive reviews → short-circuit to aggregate", len(decisive))
+    logger.info("factcheck_hit: %d decisive reviews → short-circuit to aggregate", len(relevant_decisive))
     return {
-        "evidence_items": decisive,
-        "stances": decisive,
+        "evidence_items": relevant_decisive,
+        "stances": relevant_decisive,
         "factcheck_hit": True,
     }
