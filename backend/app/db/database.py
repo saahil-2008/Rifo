@@ -30,18 +30,18 @@ async def init_db() -> None:
 
     logger.info("database: connecting to %s", settings.database_url.split("@")[-1])
 
+    async def init_connection(conn):
+        await register_vector(conn)
+
     pool = await asyncpg.create_pool(
         dsn=settings.database_url,
         min_size=2,
         max_size=10,
         command_timeout=30,
+        init=init_connection,
     )
 
-    # Register pgvector type for all connections in the pool
-    async with pool.acquire() as conn:
-        await register_vector(conn)
-
-    logger.info("database: connection pool initialized (pgvector registered)")
+    logger.info("database: connection pool initialized (pgvector registered on all connections)")
 
 
 async def close_db() -> None:

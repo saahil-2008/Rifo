@@ -41,19 +41,17 @@ async def find_similar(embedding: list[float], threshold: float | None = None) -
             v.explanation,
             v.earliest_url,
             v.earliest_date,
-            1 - (c.embedding <=> $1::vector) AS similarity
+            1 - (c.embedding <=> $1) AS similarity
         FROM claims c
         JOIN verdicts v ON v.claim_id = c.id
-        WHERE 1 - (c.embedding <=> $1::vector) >= $2
+        WHERE 1 - (c.embedding <=> $1) >= $2
           AND v.expires_at > NOW()
         ORDER BY similarity DESC
         LIMIT 1
     """
 
-    vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
-
     async with database.pool.acquire() as conn:
-        row = await conn.fetchrow(query, vec_str, threshold)
+        row = await conn.fetchrow(query, embedding, threshold)
 
     if row is None:
         return None
@@ -74,16 +72,14 @@ async def insert_claim(
     embedding: list[float],
 ) -> int:
     """Insert a new claim and return its ID."""
-    vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
-
     query = """
         INSERT INTO claims (text, text_original, lang, embedding)
-        VALUES ($1, $2, $3, $4::vector)
+        VALUES ($1, $2, $3, $4)
         RETURNING id
     """
 
     async with database.pool.acquire() as conn:
-        claim_id = await conn.fetchval(query, text, text_original, lang, vec_str)
+        claim_id = await conn.fetchval(query, text, text_original, lang, embedding)
 
     logger.info("claims: inserted claim_id=%d text='%s'", claim_id, text[:60])
     return claim_id

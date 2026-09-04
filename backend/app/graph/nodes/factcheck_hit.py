@@ -12,6 +12,7 @@ decisive, so it falls through to web retrieval for more evidence.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from app.config import settings
@@ -33,17 +34,19 @@ async def factcheck_hit(state: PipelineState) -> PipelineState:
         return {}
 
     # Search the normalized English claim always; also fork to the source
-    # language when present, mirroring the retrieve node's multilingual split.
+    # language when present in parallel.
     queries = [(claim, "en")]
     if source_lang != "en" and claim_original:
         queries.append((claim_original, source_lang))
 
+    raw_results = await asyncio.gather(
+        *(search_claims(query, lang) for query, lang in queries),
+        return_exceptions=True,
+    )
     results: list[dict] = []
-    for query, lang in queries:
-        try:
-            results.extend(await search_claims(query, lang))
-        except Exception as e:
-            logger.warning("factcheck_hit: lookup failed for '%s' (%s): %s", query[:60], lang, e)
+    for res in raw_results:
+        if isinstance(res, list):
+            results.extend(res)
 
     # Deduplicate by URL, keeping the strongest stance.
     strong: list[dict] = []

@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CREDIBILITY = 0.4
 
 # ── Thresholds ──
-MIN_SOURCES_FOR_VERDICT = 2
+MIN_SOURCES_FOR_VERDICT = 1
 CREDIBILITY_FLOOR = 0.3
 MANIPULATED_DATE_GAP_DAYS = 30  # image predates claimed context by this much
 

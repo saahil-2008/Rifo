@@ -99,12 +99,12 @@ def classify_nli(premises: list[str], hypotheses: list[str]) -> list[dict]:
         hypotheses,
         padding=True,
         truncation=True,
-        max_length=512,
+        max_length=128,
         return_tensors="pt",
     ).to(_device)
 
-    # Single forward pass (constraint: batched, not per-item)
-    with torch.no_grad():
+    # Single forward pass with inference_mode for max CPU throughput
+    with torch.inference_mode():
         outputs = nli_model(**inputs)
 
     # mDeBERTa label order: 0=contradiction, 1=neutral, 2=entailment

@@ -4,13 +4,23 @@ WS   /v1/verify/stream  — primary path, progressive frames (FR-7)
 POST /v1/verify          — sync fallback, full response
 
 WebSocket streaming protocol:
-  Client connects → sends JSON { image_b64, device_id }
-  Server streams frames:
+  Client connects → sends JSON payload (three accepted shapes):
+
+  1. Chrome extension — text path (skips vision_extract, enters at embed_claim):
+       { "type": "text", "content": "<selected text>", "device_id": "..." }
+
+  2. Chrome extension — image URL path (server fetches, full vision pipeline):
+       { "type": "image", "image_url": "https://...", "device_id": "..." }
+
+  3. Legacy Android client (still accepted for curl / wscat tests):
+       { "image_b64": "<base64 JPEG>", "device_id": "..." }
+
+  Server streams frames in order:
     1. {"stage":"extracted", ...}
     2. {"stage":"cache_hit"} or {"stage":"cache_miss"}
-    3. {"stage":"verdict", ...}    ← bubble updates here
-    4. {"stage":"evidence", ...}   ← Detail screen only
-    5. {"stage":"explanation", ...} ← Detail screen only
+    3. {"stage":"verdict", ...}    ← extension card updates here
+    4. {"stage":"evidence", ...}   ← card evidence list
+    5. {"stage":"explanation", ...} ← card explanation
     6. {"stage":"done"}
   OR: {"stage":"error", "code":"...", "message":"..."}
 
@@ -21,13 +31,17 @@ requests a retry emits nothing.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import logging
 import time
 
+import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 
 from app.models.schemas import (
+    ExtensionRequest,
     VerifyRequest,
     VerdictResponse,
     ExtractedFrame,
@@ -46,16 +60,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1")
 
-# ── Build the graph once at module import ──
-_graph = None
+# ── Graph cache keyed by entry_node (compiled once per entry point) ──
+# Two variants are needed:
+#   "vision_extract" — full pipeline (legacy image_b64 + extension image-url)
+#   "embed_claim"    — text shortcut (extension text path, skips vision_extract)
+_graphs: dict[str, object] = {}
 
 
-def _get_graph():
-    """Lazy-init the compiled graph (built once, reused for all requests)."""
-    global _graph
-    if _graph is None:
-        _graph = build_verification_graph()
-    return _graph
+def _get_graph(entry_node: str = "vision_extract"):
+    """Return the compiled graph for the given entry node, building it once."""
+    if entry_node not in _graphs:
+        _graphs[entry_node] = build_verification_graph(entry_node=entry_node)
+    return _graphs[entry_node]
 
 
 # ── WebSocket streaming endpoint (primary path) ──
@@ -65,9 +81,10 @@ def _get_graph():
 async def verify_stream(websocket: WebSocket) -> None:
     """WebSocket endpoint for progressive verification (FR-7).
 
-    The bubble updates on the verdict frame and ignores later frames; only the
-    Detail screen consumes evidence/explanation. Every terminating path emits
-    either `done` or `error`, never neither.
+    Accepts three request shapes — see module docstring for details.
+    The extension card updates on the verdict frame; evidence and explanation
+    stream in after. Every terminating path emits either `done` or `error`,
+    never neither.
     """
     await websocket.accept()
     start_time = time.monotonic()
@@ -78,27 +95,116 @@ async def verify_stream(websocket: WebSocket) -> None:
     try:
         raw = await websocket.receive_text()
         data = json.loads(raw)
-        request = VerifyRequest(**data)
 
-        logger.info(
-            "verify/stream: received request (device=%s, image=%d bytes b64)",
-            request.device_id,
-            len(request.image_b64),
-        )
+        # ── Detect request shape and build initial pipeline state ──
+        # entry_node controls where the graph starts; text input skips
+        # vision_extract entirely (no model call, no base64 needed).
+        entry_node = "vision_extract"  # default
 
-        # ── Build initial state ──
-        initial_state: PipelineState = {
-            "image_b64": request.image_b64,
-            "device_id": request.device_id,
-            "retry_count": 0,
-        }
+        if "type" in data:
+            # ── Chrome extension request ──
+            ext_req = ExtensionRequest(**data)
+
+            if ext_req.type == "text":
+                # Text path: DOM already has the text; no screenshot needed.
+                # Pre-fill claim fields and enter at embed_claim.
+                content = (ext_req.content or "").strip()
+                if not content:
+                    await send(ErrorFrame(
+                        code="no_claim_found",
+                        message="Empty selection — nothing to verify",
+                    ))
+                    await websocket.close()
+                    return
+
+                logger.info(
+                    "verify/stream: extension text request (device=%s, len=%d)",
+                    ext_req.device_id, len(content),
+                )
+
+                initial_state: PipelineState = {
+                    # Populate the fields that vision_extract would normally set
+                    "claim": content,
+                    "claim_original": content,
+                    "source_lang": "en",  # extension operates on DOM text; browser already decoded it
+                    "content_type": "text_message",
+                    "has_image_content": False,
+                    "checkable": True,
+                    "device_id": ext_req.device_id,
+                    "retry_count": 0,
+                }
+                entry_node = "embed_claim"  # skip vision_extract
+
+            else:  # type == "image"
+                # Image-URL path: fetch the image server-side, base64-encode,
+                # then run the normal full pipeline through vision_extract.
+                image_url = (ext_req.image_url or "").strip()
+                if not image_url:
+                    await send(ErrorFrame(
+                        code="upload_failed",
+                        message="No image URL provided",
+                    ))
+                    await websocket.close()
+                    return
+
+                logger.info(
+                    "verify/stream: extension image-url request (device=%s, url=%.80s)",
+                    ext_req.device_id, image_url,
+                )
+
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.get(image_url, follow_redirects=True)
+                        resp.raise_for_status()
+                        image_b64 = base64.b64encode(resp.content).decode()
+                except Exception as fetch_err:
+                    logger.warning("verify/stream: failed to fetch image URL: %s", fetch_err)
+                    await send(ErrorFrame(
+                        code="upload_failed",
+                        message=f"Could not fetch image: {fetch_err}",
+                    ))
+                    await websocket.close()
+                    return
+
+                initial_state = {
+                    "image_b64": image_b64,
+                    "device_id": ext_req.device_id,
+                    "retry_count": 0,
+                }
+                # entry_node stays "vision_extract"
+
+        else:
+            # ── Legacy Android / curl request (image_b64) ──
+            request = VerifyRequest(**data)
+            logger.info(
+                "verify/stream: legacy image_b64 request (device=%s, image=%d bytes b64)",
+                request.device_id,
+                len(request.image_b64),
+            )
+            initial_state = {
+                "image_b64": request.image_b64,
+                "device_id": request.device_id,
+                "retry_count": 0,
+            }
 
         # ── Stream through the graph node by node ──
-        graph = _get_graph()
+        graph = _get_graph(entry_node=entry_node)
         final_state: dict = {}
+
+        # For extension text path: emit the extracted frame immediately
+        # (cache_probe or embed_claim won't emit it since vision_extract was skipped).
+        if entry_node == "embed_claim":
+            await send(ExtractedFrame(
+                claim=initial_state.get("claim", ""),
+                claim_original=initial_state.get("claim_original", ""),
+                source_lang=initial_state.get("source_lang", "en"),
+            ))
+            final_state.update(initial_state)
 
         async for event in graph.astream(initial_state, stream_mode="updates"):
             for node_name, node_output in event.items():
+                if not node_output:
+                    continue
                 final_state.update(node_output)
 
                 if node_name == "vision_extract":
@@ -140,7 +246,7 @@ async def verify_stream(websocket: WebSocket) -> None:
                             ),
                         ))
                         await send(ExplanationFrame(
-                            text=final_state.get("explanation", ""),
+                            text=final_state.get("explanation") or "",
                         ))
                         await send(DoneFrame())
 

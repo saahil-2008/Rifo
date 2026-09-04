@@ -23,8 +23,17 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 FACTCHECK_API_URL = "https://factchecktools.googleapis.com/v1alpha1/claims:search"
-REQUEST_TIMEOUT = 5.0
+REQUEST_TIMEOUT = 3.0
 MAX_ITEMS = 8
+
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
+    return _client
 
 # ── Rating text → stance (order matters: refute words checked first) ──
 _REFUTE_WORDS = (
@@ -113,10 +122,10 @@ async def search_claims(query: str, language_code: str = "en") -> list[dict]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.get(FACTCHECK_API_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+        client = _get_client()
+        resp = await client.get(FACTCHECK_API_URL, params=params)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as e:
         logger.warning("factcheck: lookup failed for '%s': %s", query[:60], e)
         return []

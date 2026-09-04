@@ -21,7 +21,21 @@ logger = logging.getLogger(__name__)
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
 
 # Timeout per request (used inside asyncio.gather with return_exceptions=True)
-REQUEST_TIMEOUT = 5.0
+REQUEST_TIMEOUT = 3.0
+
+# Wikipedia MediaWiki API policy requires a descriptive User-Agent
+WIKIPEDIA_HEADERS = {
+    "User-Agent": "RifoFactChecker/1.0 (https://rifo.app; dev@rifo.app)"
+}
+
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT, headers=WIKIPEDIA_HEADERS)
+    return _client
 
 
 async def search_articles(
@@ -55,10 +69,10 @@ async def search_articles(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.get(base_url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+        client = _get_client()
+        resp = await client.get(base_url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
 
         results = []
         for item in data.get("query", {}).get("search", []):
@@ -129,10 +143,10 @@ async def search_recent(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.get(base_url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+        client = _get_client()
+        resp = await client.get(base_url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
 
         results = []
         for item in data.get("query", {}).get("search", []):

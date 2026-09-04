@@ -2,16 +2,39 @@
 
 from __future__ import annotations
 
+from typing import Literal, Optional
+
 from pydantic import BaseModel, Field
 
 
-# ── Request ──
+# ── Requests ──
 
 
 class VerifyRequest(BaseModel):
-    """Request body for POST /v1/verify and WS /v1/verify/stream."""
+    """Legacy request body for POST /v1/verify and WS /v1/verify/stream.
+
+    Kept intact for backward compatibility with existing curl / wscat tests.
+    The extension uses ExtensionRequest instead.
+    """
 
     image_b64: str = Field(..., description="Base64-encoded downscaled JPEG screenshot, under 200KB")
+    device_id: str = Field(..., description="Anonymous device UUID for viral counter only")
+
+
+class ExtensionRequest(BaseModel):
+    """Request body sent by the Chrome extension over WS /v1/verify/stream.
+
+    Two shapes:
+      { "type": "text",  "content": "<selected text>",      "device_id": "..." }
+      { "type": "image", "image_url": "<src URL of image>",  "device_id": "..." }
+
+    Text requests skip vision_extract entirely and enter at embed_claim.
+    Image requests are fetched server-side and processed through the full pipeline.
+    """
+
+    type: Literal["text", "image"] = Field(..., description="'text' for selected text, 'image' for image src URL")
+    content: Optional[str] = Field(None, description="Selected text — required when type='text'")
+    image_url: Optional[str] = Field(None, description="Image src URL — required when type='image'")
     device_id: str = Field(..., description="Anonymous device UUID for viral counter only")
 
 

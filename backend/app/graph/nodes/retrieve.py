@@ -26,7 +26,7 @@ from app.services import translate
 logger = logging.getLogger(__name__)
 
 # Per-source timeout (seconds)
-SOURCE_TIMEOUT = 5.0
+SOURCE_TIMEOUT = 3.0
 
 
 async def _safe_search(coro, label: str) -> list[dict]:
@@ -73,14 +73,14 @@ async def retrieve(state: PipelineState) -> PipelineState:
     def add_job(lang: str, coro) -> None:
         jobs.append({"lang": lang, "coro": _safe_search(coro, f"search_{lang}")})
 
-    add_job("en", search_articles(query, count=10, lang="en"))
-    add_job("en", search_recent(query, count=5, lang="en"))
+    add_job("en", search_articles(query, count=3, lang="en"))
+    add_job("en", search_recent(query, count=2, lang="en"))
 
     # Fork for source language (parallel, no additional latency)
     if source_lang != "en":
         claim_original = state.get("claim_original", claim)
-        add_job(source_lang, search_articles(claim_original, count=5, lang=source_lang))
-        add_job(source_lang, search_recent(claim_original, count=3, lang=source_lang))
+        add_job(source_lang, search_articles(claim_original, count=3, lang=source_lang))
+        add_job(source_lang, search_recent(claim_original, count=2, lang=source_lang))
 
     # Reverse image search runs inside the same gather (constraint #19), never
     # sequentially after NLI. Its result is collected into ris_out and surfaced

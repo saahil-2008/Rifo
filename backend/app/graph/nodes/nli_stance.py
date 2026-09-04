@@ -23,7 +23,7 @@ async def nli_stance(state: PipelineState) -> PipelineState:
     across all (evidence_snippet, claim) pairs.
     """
     claim = state.get("claim", "")
-    evidence_items = state.get("evidence_items", [])
+    evidence_items = state.get("evidence_items", [])[:3]
 
     if not evidence_items:
         logger.warning("nli_stance: no evidence items to classify")
