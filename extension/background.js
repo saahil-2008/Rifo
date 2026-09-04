@@ -79,9 +79,20 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       menuItemId: info.menuItemId,
     });
   } catch (e) {
-    // Content script not ready (e.g. extension just loaded mid-page).
-    console.warn("Rifo: content script not reachable:", e);
-    return;
+    console.warn("Rifo: content script not reachable, injecting dynamically...", e);
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["content.js"],
+      });
+      await chrome.tabs.sendMessage(tab.id, {
+        type: "start_verify",
+        menuItemId: info.menuItemId,
+      });
+    } catch (err) {
+      console.error("Rifo: failed to dynamically inject:", err);
+      return;
+    }
   }
 
   // Build the request payload based on which menu item was clicked.

@@ -434,28 +434,53 @@
     return String(n);
   }
 
-  // ── Card position ────────────────────────────────────────────────────────────
+    let lastX = 0;
+    let lastY = 0;
 
-  function getCardPosition() {
-    const CARD_W = 360;
-    const CARD_H = 400; // approx, card is max-h 540
-    const MARGIN = 12;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    // Capture the exact pixel where the user right-clicks, as a bulletproof fallback.
+    // Complex web apps (like WhatsApp Web) often clear the native text selection when right-clicking.
+    document.addEventListener("contextmenu", (e) => {
+      lastX = e.clientX;
+      lastY = e.clientY;
+    }, true);
 
-    let x = vw - CARD_W - MARGIN;
-    let y = vh - CARD_H - MARGIN;
+    function getCardPosition() {
+      const CARD_W = 360;
+      const CARD_H = 400; // approx, card is max-h 540
+      const MARGIN = 12;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+
+      // Default to right-click coordinates instead of bottom-right of screen
+      let x = lastX > 0 ? lastX + MARGIN : vw - CARD_W - MARGIN;
+      let y = lastY > 0 ? lastY + MARGIN : vh - CARD_H - MARGIN;
+      
+      // Keep fallback coordinates within viewport bounds
+      if (y + CARD_H > vh) y = Math.max(MARGIN, (lastY > 0 ? lastY : vh) - CARD_H - MARGIN);
+      x = Math.max(MARGIN, Math.min(x, vw - CARD_W - MARGIN));
 
     try {
-      const sel = window.getSelection();
-      if (sel && sel.rangeCount > 0) {
-        const rect = sel.getRangeAt(0).getBoundingClientRect();
+      const active = document.activeElement;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+        const rect = active.getBoundingClientRect();
         if (rect.width > 0 || rect.height > 0) {
           x = Math.min(rect.left, vw - CARD_W - MARGIN);
           y = rect.bottom + MARGIN;
           if (y + CARD_H > vh) y = rect.top - CARD_H - MARGIN;
           if (y < MARGIN) y = MARGIN;
           x = Math.max(MARGIN, Math.min(x, vw - CARD_W - MARGIN));
+        }
+      } else {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          const rect = sel.getRangeAt(0).getBoundingClientRect();
+          if (rect.width > 0 || rect.height > 0) {
+            x = Math.min(rect.left, vw - CARD_W - MARGIN);
+            y = rect.bottom + MARGIN;
+            if (y + CARD_H > vh) y = rect.top - CARD_H - MARGIN;
+            if (y < MARGIN) y = MARGIN;
+            x = Math.max(MARGIN, Math.min(x, vw - CARD_W - MARGIN));
+          }
         }
       }
     } catch (_) {}
